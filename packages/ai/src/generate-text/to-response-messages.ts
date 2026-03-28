@@ -14,16 +14,28 @@ import { ToolSet } from './tool-set';
 export async function toResponseMessages<TOOLS extends ToolSet>({
   content: inputContent,
   tools,
+  fireAndForgetTools,
 }: {
   content: Array<ContentPart<TOOLS>>;
   tools: TOOLS | undefined;
+  fireAndForgetTools?: Set<string>;
 }): Promise<Array<AssistantModelMessage | ToolModelMessage>> {
   const responseMessages: Array<AssistantModelMessage | ToolModelMessage> = [];
+  const fireAndForgetToolNames = fireAndForgetTools ?? new Set<string>();
 
   const content: AssistantContent = [];
   for (const part of inputContent) {
     // Skip sources - they are response-only content that no provider expects back
     if (part.type === 'source') {
+      continue;
+    }
+
+    // Skip fire-and-forget tool calls — they are executed for side effects
+    // but should not appear in messages sent to the model in subsequent steps
+    if (
+      part.type === 'tool-call' &&
+      fireAndForgetToolNames.has(part.toolName)
+    ) {
       continue;
     }
 
@@ -145,6 +157,11 @@ export async function toResponseMessages<TOOLS extends ToolSet>({
       !(part.type === 'tool-result' || part.type === 'tool-error') ||
       part.providerExecuted
     ) {
+      continue;
+    }
+
+    // Skip fire-and-forget tool results — not sent to the model
+    if (fireAndForgetToolNames.has(part.toolName)) {
       continue;
     }
 

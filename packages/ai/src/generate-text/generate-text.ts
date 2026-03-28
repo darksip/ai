@@ -269,6 +269,7 @@ export async function generateText<
   experimental_download: download,
   experimental_context,
   experimental_include: include,
+  experimental_fireAndForgetToolNames,
   _internal: {
     generateId = originalGenerateId,
     generateCallId = originalGenerateCallId,
@@ -419,6 +420,19 @@ export async function generateText<
      * @default undefined
      */
     experimental_context?: unknown;
+
+    /**
+     * Tool names that are treated as fire-and-forget (action tools).
+     * These tools are still executed for their side effects, but:
+     * - Their calls do not trigger a follow-up generation step
+     * - Their tool-call and tool-result are stripped from messages
+     *   sent to the model in subsequent steps
+     *
+     * Use this for tools that perform side effects (e.g. setting a title,
+     * logging, notifications) whose results do not need to be incorporated
+     * into the model's response.
+     */
+    experimental_fireAndForgetToolNames?: Array<keyof NoInfer<TOOLS>>;
 
     /**
      * Settings for controlling what data is included in step results.
@@ -657,7 +671,11 @@ export async function generateText<
     let currentModelResponse: Awaited<
       ReturnType<LanguageModelV4['doGenerate']>
     > & { response: { id: string; timestamp: Date; modelId: string } };
+    const fireAndForgetTools = new Set(
+      experimental_fireAndForgetToolNames?.map(String) ?? [],
+    );
     let clientToolCalls: Array<TypedToolCall<TOOLS>> = [];
+    let continuableToolCalls: Array<TypedToolCall<TOOLS>> = [];
     let clientToolOutputs: Array<ToolOutput<TOOLS>> = [];
     const steps: GenerateTextResult<TOOLS, OUTPUT>['steps'] = [];
 
@@ -860,9 +878,14 @@ export async function generateText<
           });
         }
 
-        // execute client tool calls:
+        // execute client tool calls (including fire-and-forget tools for side effects):
         clientToolCalls = stepToolCalls.filter(
           toolCall => !toolCall.providerExecuted,
+        );
+
+        // continuable tool calls exclude fire-and-forget tools from loop continuation:
+        continuableToolCalls = clientToolCalls.filter(
+          toolCall => !fireAndForgetTools.has(toolCall.toolName),
         );
 
         if (tools != null) {
@@ -951,6 +974,7 @@ export async function generateText<
           ...(await toResponseMessages({
             content: stepContent,
             tools,
+            fireAndForgetTools,
           })),
         );
 
@@ -1017,10 +1041,12 @@ export async function generateText<
       }
     } while (
       // Continue if:
-      // 1. There are client tool calls that have all been executed, OR
+      // 1. There are continuable (non-fire-and-forget) client tool calls
+      //    that have all been executed, OR
       // 2. There are pending deferred results from provider-executed tools
-      ((clientToolCalls.length > 0 &&
-        clientToolOutputs.length === clientToolCalls.length) ||
+      ((continuableToolCalls.length > 0 &&
+        clientToolOutputs.filter(o => !fireAndForgetTools.has(o.toolName))
+          .length === continuableToolCalls.length) ||
         pendingDeferredToolCalls.size > 0) &&
       // continue until a stop condition is met:
       !(await isStopConditionMet({ stopConditions, steps }))

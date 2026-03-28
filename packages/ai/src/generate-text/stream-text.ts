@@ -326,6 +326,7 @@ export function streamText<
   experimental_onToolCallFinish: onToolCallFinish,
   experimental_context,
   experimental_include: include,
+  experimental_fireAndForgetToolNames,
   _internal: {
     now = originalNow,
     generateId = originalGenerateId,
@@ -511,6 +512,19 @@ export function streamText<
     experimental_context?: unknown;
 
     /**
+     * Tool names that are treated as fire-and-forget (action tools).
+     * These tools are still executed for their side effects, but:
+     * - Their calls do not trigger a follow-up generation step
+     * - Their tool-call and tool-result are stripped from messages
+     *   sent to the model in subsequent steps
+     *
+     * Use this for tools that perform side effects (e.g. setting a title,
+     * logging, notifications) whose results do not need to be incorporated
+     * into the model's response.
+     */
+    experimental_fireAndForgetToolNames?: Array<keyof NoInfer<TOOLS>>;
+
+    /**
      * Settings for controlling what data is included in step results.
      * Disabling inclusion can help reduce memory usage when processing
      * large payloads like images.
@@ -589,6 +603,9 @@ export function streamText<
     experimental_context,
     download,
     include,
+    fireAndForgetTools: new Set(
+      experimental_fireAndForgetToolNames?.map(String) ?? [],
+    ),
   });
 }
 
@@ -769,6 +786,7 @@ class DefaultStreamTextResult<
     experimental_context,
     download,
     include,
+    fireAndForgetTools,
   }: {
     model: LanguageModelV4;
     telemetry: TelemetrySettings | undefined;
@@ -805,6 +823,7 @@ class DefaultStreamTextResult<
     experimental_context: unknown;
     download: DownloadFunction | undefined;
     include: { requestBody?: boolean } | undefined;
+    fireAndForgetTools: Set<string>;
 
     // callbacks:
     onChunk: undefined | StreamTextOnChunkCallback<TOOLS>;
@@ -1039,6 +1058,7 @@ class DefaultStreamTextResult<
           const stepMessages = await toResponseMessages({
             content: recordedContent,
             tools,
+            fireAndForgetTools,
           });
 
           // Add step information (after response messages are updated):
@@ -1870,6 +1890,11 @@ class DefaultStreamTextResult<
                     toolOutput => toolOutput.providerExecuted !== true,
                   );
 
+                  // continuable tool calls exclude fire-and-forget tools from loop continuation:
+                  const continuableToolCalls = clientToolCalls.filter(
+                    toolCall => !fireAndForgetTools.has(toolCall.toolName),
+                  );
+
                   // Track provider-executed tool calls that support deferred results.
                   // In programmatic tool calling, a server tool (e.g., code_execution) may
                   // trigger a client tool, and the server tool's result is deferred until
@@ -1912,10 +1937,13 @@ class DefaultStreamTextResult<
 
                   if (
                     // Continue if:
-                    // 1. There are client tool calls that have all been executed, OR
+                    // 1. There are continuable (non-fire-and-forget) client tool calls
+                    //    that have all been executed, OR
                     // 2. There are pending deferred results from provider-executed tools
-                    ((clientToolCalls.length > 0 &&
-                      clientToolOutputs.length === clientToolCalls.length) ||
+                    ((continuableToolCalls.length > 0 &&
+                      clientToolOutputs.filter(
+                        o => !fireAndForgetTools.has(o.toolName),
+                      ).length === continuableToolCalls.length) ||
                       pendingDeferredToolCalls.size > 0) &&
                     // continue until a stop condition is met:
                     !(await isStopConditionMet({
@@ -1930,6 +1958,7 @@ class DefaultStreamTextResult<
                           // use transformed content to create the messages for the next step:
                           recordedSteps[recordedSteps.length - 1].content,
                         tools,
+                        fireAndForgetTools,
                       })),
                     );
 
