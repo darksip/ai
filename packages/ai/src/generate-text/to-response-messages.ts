@@ -30,15 +30,6 @@ export async function toResponseMessages<TOOLS extends ToolSet>({
       continue;
     }
 
-    // Skip fire-and-forget tool calls — they are executed for side effects
-    // but should not appear in messages sent to the model in subsequent steps
-    if (
-      part.type === 'tool-call' &&
-      fireAndForgetToolNames.has(part.toolName)
-    ) {
-      continue;
-    }
-
     // Skip non-provider-executed tool results/errors (they go in the tool message)
     if (
       (part.type === 'tool-result' || part.type === 'tool-error') &&
@@ -160,8 +151,15 @@ export async function toResponseMessages<TOOLS extends ToolSet>({
       continue;
     }
 
-    // Skip fire-and-forget tool results — not sent to the model
+    // Fire-and-forget tools: replace full result with a minimal acknowledgment
+    // so the model knows the call succeeded without polluting the context
     if (fireAndForgetToolNames.has(part.toolName)) {
+      toolResultContent.push({
+        type: 'tool-result',
+        toolCallId: part.toolCallId,
+        toolName: part.toolName,
+        output: { type: 'text', value: 'Done.' },
+      });
       continue;
     }
 
